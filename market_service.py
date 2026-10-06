@@ -1,19 +1,5 @@
-"""
-MarketPulse - Market Data Service
-
-Fetches current market data with provider fallbacks.
-
-Provider priority:
-    1. Finnhub
-    2. Alpha Vantage
-    3. EODHD
-
-The service normalizes all providers into one common format so
-the signal engine does not need to know which API supplied the data.
-"""
-
 from __future__ import annotations
-
+import yfinance as yf
 import logging
 import os
 from datetime import datetime, timezone
@@ -645,6 +631,102 @@ def fetch_market_data_for_symbols(
 
     return results
 
+def fetch_nifty_benchmark():
+    """
+    Fetch NIFTY 50 benchmark data.
+
+    Uses Yahoo Finance's NIFTY 50 symbol:
+        ^NSEI
+
+    Returns the same basic structure used by market_service.
+    """
+
+    symbol = "^NSEI"
+
+    try:
+        # Recent intraday data
+        intraday = yf.download(
+            symbol,
+            period="1d",
+            interval="5m",
+            progress=False,
+            auto_adjust=False,
+        )
+
+        if intraday.empty:
+            logger.warning(
+                "NIFTY benchmark returned no intraday data."
+            )
+            return None
+
+        latest_close = intraday["Close"].iloc[-1]
+
+        # Handle possible DataFrame/Series shape from yfinance
+        if hasattr(latest_close, "iloc"):
+            latest_close = latest_close.iloc[0]
+
+        latest_price = float(latest_close)
+
+        # Previous daily close
+        daily = yf.download(
+            symbol,
+            period="5d",
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+        )
+
+        if daily.empty:
+            logger.warning(
+                "NIFTY benchmark returned no daily data."
+            )
+            return None
+
+        closes = daily["Close"]
+
+        if hasattr(closes, "columns"):
+            closes = closes.iloc[:, 0]
+
+        closes = closes.dropna()
+
+        if len(closes) < 2:
+            logger.warning(
+                "Not enough NIFTY data to calculate change."
+            )
+            return None
+
+        previous_close = float(closes.iloc[-2])
+
+        change_percent = (
+            (latest_price - previous_close)
+            / previous_close
+        ) * 100
+
+        result = {
+            "symbol": symbol,
+            "price": latest_price,
+            "previous_close": previous_close,
+            "change_percent": change_percent,
+            "provider": "yfinance",
+            "provider_symbol": symbol,
+        }
+
+        logger.info(
+            "NIFTY 50 | %.2f (%+.2f%%)",
+            latest_price,
+            change_percent,
+        )
+
+        return result
+
+    except Exception as exc:
+
+        logger.exception(
+            "NIFTY benchmark fetch failed: %s",
+            exc,
+        )
+
+        return None
 
 # ============================================================
 # TEST
@@ -699,3 +781,16 @@ if __name__ == "__main__":
         )
 
     print("=" * 60)
+
+    print("\nTesting NIFTY 50 benchmark...")
+
+    nifty = fetch_nifty_benchmark()
+
+    if nifty:
+        print(
+            f"NIFTY 50 | "
+            f"{nifty['price']:.2f} "
+            f"({nifty['change_percent']:+.2f}%)"
+        )
+    else:
+        print("NIFTY 50 benchmark unavailable.")

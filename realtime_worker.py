@@ -32,9 +32,13 @@ from typing import Any, Dict, List
 
 from news_service import fetch_company_news
 from sentiment_service import get_finbert
-from market_service import fetch_market_data
+from market_service import (
+    fetch_market_data,
+    fetch_nifty_benchmark,
+)
 from signal_service import generate_signal
 from redis_client import get_redis
+
 
 
 # ============================================================
