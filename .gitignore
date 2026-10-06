@@ -1,3 +1,18 @@
-venv/
+# Environment variables
+.env
+
+# Python
 __pycache__/
-finbert_model
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Model files
+models/finbert_model/
+
+# Logs
+*.log
+
+# IDE
+.vscode/

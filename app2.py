@@ -1,172 +1,477 @@
 import streamlit as st
-from transformers import BertTokenizer, BertForSequenceClassification
-import torch
-import requests
-import numpy as np
-from datetime import datetime
-import feedparser
-from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+from datetime import datetime, timezone
+import time
 
-MODEL_PATH = "finbert_model"
-tokenizer = BertTokenizer.from_pretrained(MODEL_PATH)
-model = BertForSequenceClassification.from_pretrained(MODEL_PATH)
+from redis_client import get_redis
 
-API_KEY_NEWSDATA = 'pub_e2e341280d184b689583d52fa1358868'
 
-synonyms_map = {
-    'INFY': ['Infosys', 'Infosys Technologies'],
-    'MARUTI': ['Maruti Suzuki', 'Maruti Suzuki India', 'Maruti'],
-    'TATAMOTORS': ['Tata Motors Ltd', 'Tata Motors'],
-    'RELIANCE': ['Reliance Industries', 'Reliance'],
-    'HDFCBANK': ['HDFC Bank'],
-    'ICICIBANK': ['ICICI Bank']
-}
+# ============================================================
+# PAGE CONFIG
+# ============================================================
 
-def requests_session_with_retries(total_retries=3, backoff_factor=0.3):
-    session = requests.Session()
-    retries = Retry(total=total_retries,
-                    backoff_factor=backoff_factor,
-                    status_forcelist=[429, 500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retries)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
-    return session
+st.set_page_config(
+    page_title="MarketPulse",
+    page_icon="📈",
+    layout="wide",
+)
 
-session = requests_session_with_retries()
 
-@st.cache_data(ttl=600)
-def get_moneycontrol_rss_news():
-    url = 'https://www.moneycontrol.com/rss/markets.xml'
+# ============================================================
+# CONFIG
+# ============================================================
+
+DEFAULT_SYMBOL = "INFY"
+
+REFRESH_INTERVAL_SECONDS = 10
+
+
+# ============================================================
+# REDIS
+# ============================================================
+
+@st.cache_resource
+def get_redis_client():
+    return get_redis()
+
+
+redis_client = get_redis_client()
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def format_timestamp(timestamp):
+    """Format ISO timestamp for display."""
+
+    if not timestamp:
+        return "Unknown"
+
     try:
-        feed = feedparser.parse(url)
-        return [entry.title for entry in feed.entries[:5]]
-    except:
-        return []
+        dt = datetime.fromisoformat(
+            timestamp.replace("Z", "+00:00")
+        )
 
-@st.cache_data(ttl=600)
-def get_google_news_rss(company_name):
-    search = company_name.replace(' ', '+') + '+NSE'
-    url = f"https://news.google.com/rss/search?q={search}"
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    except Exception:
+        return str(timestamp)
+
+
+def get_signal(symbol):
+    """Get latest signal from Redis."""
+
     try:
-        feed = feedparser.parse(url)
-        return [entry.title for entry in feed.entries[:5]]
-    except:
-        return []
+        return redis_client.get_signal(symbol)
+    except Exception as exc:
+        st.error(f"Redis signal error: {exc}")
+        return None
 
-@st.cache_data(ttl=600)
-def get_newsdata_news(company_name, api_key):
-    url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={company_name}&language=en"
+
+def get_news(symbol):
+    """Get latest news from Redis."""
+
     try:
-        resp = session.get(url, timeout=10)
-        data = resp.json()
-        results = data.get('results', [])
-        if results:
-            return [item.get('title', '') for item in results[:5]]
-        return []
-    except:
+        return redis_client.get_news(symbol) or []
+    except Exception as exc:
+        st.error(f"Redis news error: {exc}")
         return []
 
-@st.cache_data(ttl=600)
-def finbert_sentiment(texts):
-    sentiment_labels = ['negative', 'neutral', 'positive']
-    scores = []
-    results = []
-    for text in texts:
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
-        outputs = model(**inputs)
-        probs = torch.nn.functional.softmax(outputs.logits, dim=1)[0]
-        score = (-1 * probs[0].item()) + (1 * probs[2].item())
-        scores.append(score)
-        pred = sentiment_labels[torch.argmax(probs).item()]
-        results.append({'text': text, 'score': score, 'pred': pred})
-    avg_score = float(np.mean(scores)) if scores else 0.0
-    return avg_score, results
 
-def buy_decision(avg_score, threshold=0.15):
-    if avg_score > threshold:
-        return ("Buy", "🟢")
-    elif avg_score < -threshold:
-        return ("Sell", "🔴")
-    else:
-        return ("Hold", "🟡")
+def signal_color(signal):
+    """Return display color for signal."""
 
-tickers = {
-    'AAPL': 'AAPL',
-    'MSFT': 'MSFT',
-    'NVDA': 'NVDA',
-    'GOOGL': 'GOOGL',
-    'AMZN': 'AMZN',
-    'META': 'META',
-    'TSLA': 'TSLA',
-    'NFLX': 'NFLX',
-    'JPM': 'JPM',
-    'BRK.B': 'BRK-B',
-    'TCS': 'TCS.NS',
-    'RELIANCE': 'RELIANCE.NS',
-    'SBI': 'SBIN.NS',
-    'HDFCBANK': 'HDFCBANK.NS',
-    'ICICIBANK': 'ICICIBANK.NS',
-    'INFY': 'INFY.NS',
-    'MARUTI': 'MARUTI.NS',
-    'BAJFINANCE': 'BAJFINANCE.NS',
-    'BHARTIARTL': 'BHARTIARTL.NS',
-    'TATAMOTORS': 'TATAMOTORS.NS',
-    'AXISBANK': 'AXISBANK.NS',
-    'BHEL': 'BHEL.NS',
-    'ADANIPOWER': 'ADANIPOWER.NS'
-}
+    signal = str(signal).upper()
 
-st.set_page_config(page_title="Financial Sentiment Dashboard", layout="wide")
-st.sidebar.title("🔍 Search Stocks")
-search_term = st.sidebar.text_input("Enter stock name or ticker", "").strip().lower()
+    if signal == "BUY":
+        return "green"
 
-if search_term:
-    filtered_tickers = {name: symbol for name, symbol in tickers.items() if search_term in name.lower()}
-else:
-    filtered_tickers = tickers
+    if signal == "SELL":
+        return "red"
 
-st.sidebar.title("🔄 Refresh")
-if st.sidebar.button("Refresh Dashboard"):
+    return "orange"
+
+
+def signal_emoji(signal):
+    """Return emoji for signal."""
+
+    signal = str(signal).upper()
+
+    if signal == "BUY":
+        return "🟢"
+
+    if signal == "SELL":
+        return "🔴"
+
+    return "🟡"
+
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.title("📈 MarketPulse")
+
+st.caption(
+    "Real-time financial sentiment and market signal dashboard"
+)
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.header("⚙️ Dashboard")
+
+symbol = st.sidebar.text_input(
+    "Stock Symbol",
+    value=DEFAULT_SYMBOL,
+).strip().upper()
+
+if not symbol:
+    symbol = DEFAULT_SYMBOL
+
+
+if st.sidebar.button("🔄 Refresh Now"):
     st.rerun()
 
-st.title("📊 Real-Time Financial Sentiment Dashboard (US & India)")
-st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-stock_items = list(filtered_tickers.items())
-cols_per_row = 4
+st.sidebar.markdown("---")
 
-for i in range(0, len(stock_items), cols_per_row):
-    cols = st.columns(cols_per_row)
-    for j, (name, symbol) in enumerate(stock_items[i:i+cols_per_row]):
-        with cols[j]:
-            with st.spinner(f"Loading news for {name}..."):
-                headlines = []
-                headlines += get_moneycontrol_rss_news()
-                synonyms = synonyms_map.get(name, [name])
-                for query in synonyms:
-                    headlines += get_google_news_rss(query)
-                    headlines += get_newsdata_news(query, API_KEY_NEWSDATA)
-                unique_headlines = list(set(headlines))
-                avg_score, sentiment_results = finbert_sentiment(unique_headlines)
+st.sidebar.caption(
+    f"Auto-refresh: every {REFRESH_INTERVAL_SECONDS} seconds"
+)
 
-            decision, color = buy_decision(avg_score)
 
-            st.markdown(f"### {name} ({symbol})")
-            st.markdown(f"**Recommendation**: `{decision} {color}`")
+# ============================================================
+# REDIS HEALTH
+# ============================================================
 
-            st.markdown(
-                f"**Avg Sentiment**: "
-                f"<span style='color:{'green' if avg_score>0.15 else 'red' if avg_score<-0.15 else 'gray'};'>{avg_score:.3f}</span>",
-                unsafe_allow_html=True
+if not redis_client.health_check():
+
+    st.error(
+        "❌ Redis is not available. "
+        "Make sure Redis is running."
+    )
+
+    st.stop()
+
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+
+signal_data = get_signal(symbol)
+news_data = get_news(symbol)
+
+
+# ============================================================
+# NO SIGNAL YET
+# ============================================================
+
+if not signal_data:
+
+    st.warning(
+        f"No signal available for {symbol} yet."
+    )
+
+    st.info(
+        "Make sure realtime_worker.py is running "
+        "and has completed at least one successful cycle."
+    )
+
+    st.stop()
+
+
+# ============================================================
+# SIGNAL DATA
+# ============================================================
+
+signal = signal_data.get(
+    "signal",
+    "HOLD",
+)
+
+signal_score = float(
+    signal_data.get(
+        "signal_score",
+        0.0,
+    )
+)
+
+news_sentiment = float(
+    signal_data.get(
+        "news_sentiment",
+        0.0,
+    )
+)
+
+price_momentum = float(
+    signal_data.get(
+        "price_momentum",
+        0.0,
+    )
+)
+
+market_momentum = float(
+    signal_data.get(
+        "market_momentum",
+        0.0,
+    )
+)
+
+market_data = signal_data.get(
+    "market_data",
+    {},
+)
+
+
+# ============================================================
+# MAIN SIGNAL CARD
+# ============================================================
+
+emoji = signal_emoji(signal)
+
+st.markdown(
+    f"""
+    <div style="
+        padding: 20px;
+        border-radius: 12px;
+        border: 1px solid #444;
+        margin-bottom: 20px;
+    ">
+        <h2>{symbol}</h2>
+        <h1>{emoji} {signal}</h1>
+        <p>Market Signal</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# METRICS
+# ============================================================
+
+col1, col2, col3, col4 = st.columns(4)
+
+
+with col1:
+    st.metric(
+        "Signal Score",
+        f"{signal_score:+.3f}",
+    )
+
+
+with col2:
+    st.metric(
+        "News Sentiment",
+        f"{news_sentiment:+.3f}",
+    )
+
+
+with col3:
+    st.metric(
+        "Price Momentum",
+        f"{price_momentum:+.3f}",
+    )
+
+
+with col4:
+    st.metric(
+        "Market Momentum",
+        f"{market_momentum:+.3f}",
+    )
+
+
+# ============================================================
+# MARKET DATA
+# ============================================================
+
+st.subheader("📊 Market Data")
+
+market_col1, market_col2, market_col3, market_col4 = st.columns(4)
+
+
+price = market_data.get("price")
+
+previous_close = market_data.get(
+    "previous_close"
+)
+
+change_percent = market_data.get(
+    "change_percent"
+)
+
+provider = market_data.get(
+    "provider",
+    "Unknown",
+)
+
+
+with market_col1:
+
+    if price is not None:
+        st.metric(
+            "Current Price",
+            f"₹{float(price):,.2f}",
+        )
+    else:
+        st.metric(
+            "Current Price",
+            "N/A",
+        )
+
+
+with market_col2:
+
+    if change_percent is not None:
+        st.metric(
+            "Change",
+            f"{float(change_percent):+.2f}%",
+        )
+    else:
+        st.metric(
+            "Change",
+            "N/A",
+        )
+
+
+with market_col3:
+
+    if previous_close is not None:
+        st.metric(
+            "Previous Close",
+            f"₹{float(previous_close):,.2f}",
+        )
+    else:
+        st.metric(
+            "Previous Close",
+            "N/A",
+        )
+
+
+with market_col4:
+
+    st.metric(
+        "Data Provider",
+        str(provider),
+    )
+
+
+# ============================================================
+# NEWS
+# ============================================================
+
+st.subheader("📰 Latest News")
+
+
+if not news_data:
+
+    st.info(
+        "No news available yet."
+    )
+
+else:
+
+    for article in news_data[:10]:
+
+        title = article.get(
+            "title",
+            "Untitled",
+        )
+
+        source = article.get(
+            "source",
+            "Unknown",
+        )
+
+        sentiment = article.get(
+            "sentiment",
+            {},
+        )
+
+        label = sentiment.get(
+            "label",
+            "UNKNOWN",
+        )
+
+        score = sentiment.get(
+            "score",
+            0.0,
+        )
+
+        published_at = article.get(
+            "published_at"
+        )
+
+        url = article.get(
+            "url"
+        )
+
+        st.markdown(
+            f"### {title}"
+        )
+
+        news_col1, news_col2, news_col3 = st.columns(3)
+
+        with news_col1:
+            st.write(
+                f"**Sentiment:** {label}"
             )
 
-            st.progress(int((avg_score + 1) / 2 * 100))
+        with news_col2:
+            st.write(
+                f"**Score:** {float(score):+.3f}"
+            )
 
-            with st.expander("📰 Latest Headlines & Sentiment"):
-                if sentiment_results:
-                    for res in sentiment_results[:5]:
-                        st.write(f"• {res['text']} ({res['pred']}, {res['score']:.2f})")
-                else:
-                    st.write("No news available.")
-            st.write("---")
+        with news_col3:
+            st.write(
+                f"**Source:** {source}"
+            )
+
+        if published_at:
+            st.caption(
+                f"Published: "
+                f"{format_timestamp(published_at)}"
+            )
+
+        if url:
+            st.markdown(
+                f"[Read article]({url})"
+            )
+
+        st.divider()
+
+
+# ============================================================
+# LAST UPDATE
+# ============================================================
+
+updated_at = signal_data.get(
+    "updated_at"
+)
+
+if updated_at:
+
+    st.caption(
+        f"Signal updated: "
+        f"{format_timestamp(updated_at)}"
+    )
+
+else:
+
+    st.caption(
+        "Signal update time unavailable."
+    )
+
+
+# ============================================================
+# AUTO REFRESH
+# ============================================================
+
+time.sleep(
+    REFRESH_INTERVAL_SECONDS
+)
+
+st.rerun()
