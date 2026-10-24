@@ -1,3 +1,4 @@
+
 services:
   redis:
     image: redis:7-alpine
@@ -17,11 +18,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: worker
     env_file:
       - .env
     environment:
-      REDIS_URL: redis://redis:6379/0
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "0"
     depends_on:
       redis:
         condition: service_healthy
@@ -32,13 +34,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: dashboard
     env_file:
       - .env
     environment:
-      REDIS_URL: redis://redis:6379/0
+      REDIS_HOST: redis
+      REDIS_PORT: "6380"
+      REDIS_DB: "0"
     ports:
-      - "8501:8501"
+      - "8503:8503"
     depends_on:
       redis:
         condition: service_healthy
@@ -46,9 +49,9 @@ services:
     command:
       - streamlit
       - run
-      - app.py
+      - app2.py
       - --server.address=0.0.0.0
-      - --server.port=8501
+      - --server.port=8503
       - --server.headless=true
       - --browser.gatherUsageStats=false
 

@@ -1,0 +1,10 @@
+streamlit
+redis
+python-dotenv
+requests
+yfinance
+numpy
+pandas
+scikit-learn
+torch
+transformers
