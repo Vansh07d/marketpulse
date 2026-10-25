@@ -15,7 +15,3 @@ __pycache__/
 .idea/
 *.log
 all-data.csv
-*.pt
-*.pth
-*.bin
-*.safetensors

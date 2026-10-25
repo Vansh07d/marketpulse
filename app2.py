@@ -1,6 +1,7 @@
 import streamlit as st
 from datetime import datetime, timezone
 import time
+import os
 
 from redis_client import get_redis
 
@@ -20,9 +21,9 @@ st.set_page_config(
 # CONFIG
 # ============================================================
 
-DEFAULT_SYMBOL = "INFY"
+DEFAULT_SYMBOL = os.getenv("DEFAULT_SYMBOL", "INFY").strip().upper()
 
-REFRESH_INTERVAL_SECONDS = 10
+REFRESH_INTERVAL_SECONDS = max(3, int(os.getenv("REFRESH_INTERVAL_SECONDS", "10")))
 
 
 # ============================================================
@@ -180,7 +181,8 @@ if not signal_data:
         "and has completed at least one successful cycle."
     )
 
-    st.stop()
+    time.sleep(REFRESH_INTERVAL_SECONDS)
+    st.rerun()
 
 
 # ============================================================

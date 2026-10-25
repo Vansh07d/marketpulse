@@ -1,18 +1,11 @@
-# Environment variables
-.env
-
-# Python
+cd C:\Users\fcaka\OneDrive\Documents\marketpulse-main
+@"
+venv/
+.venv/
 __pycache__/
 *.py[cod]
-
-# Virtual environment
-.venv/
-
-# Model files
+.env
 models/finbert_model/
-
-# Logs
 *.log
-
-# IDE
 .vscode/
+"@ | Set-Content .gitignore

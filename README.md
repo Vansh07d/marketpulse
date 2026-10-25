@@ -1,208 +1,108 @@
-# Financial Sentiment Analysis Dashboard (FinBERT + Streamlit)
+# MarketPulse
 
-## Overview
+MarketPulse is a polling-based financial-news sentiment prototype. It fetches news and market quotes, scores new headlines with FinBERT, generates heuristic BUY/HOLD/SELL signals, and stores the latest state plus bounded signal history in Redis. These signals are experimental and are **not investment advice**.
 
-This project is a **financial news sentiment analysis dashboard** that uses the **FinBERT model** to analyze news headlines and generate **Buy / Hold / Sell sentiment signals** for selected stocks.
+## Requirements
 
-The application collects financial news from multiple sources, processes the headlines using **FinBERT (a BERT model trained for financial text)**, and displays the sentiment results in a **Streamlit dashboard**.
+- Python 3.12
+- Redis 7 (local) or Docker Compose
+- API keys for at least one supported news/market provider
+- Your trained FinBERT model files, unless you configure a Hugging Face model ID
 
-The model files are **not included in this repository** because they exceed GitHub’s file size limits. Instead, they are automatically generated/downloaded when running the setup script.
+## Windows / PowerShell setup
 
----
+Run from the repository root (the folder containing `requirements.txt`):
 
-# Project Structure
-
-```
-sentiment_project1
-│
-├── app2.py              # Streamlit dashboard
-├── finbert.py           # Script that downloads/creates the FinBERT model
-├── all-data.csv         # Dataset used by the model
-├── .gitignore           # Prevents large or unnecessary files from uploading
-│
-├── finbert_model/       # Generated automatically (not included in repo)
-├── venv/                # Virtual environment (ignored)
-└── __pycache__/         # Python cache (ignored)
+```powershell
+py -3.12 -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install torch
+Copy-Item .env.example .env
 ```
 
-Ignored files and folders (not pushed to GitHub):
+Edit `.env` and add whichever provider API keys you have. `torch` is installed separately so Docker can use the CPU-only wheel while Windows can choose an appropriate wheel for your machine. If the PyTorch download times out, retry with:
 
-```
-venv/
-__pycache__/
-finbert_model/
-.env
-*.pyc
+```powershell
+python -m pip install torch --timeout 300 --retries 10
 ```
 
----
+Run the model inference smoke test:
 
-# Features
-
-* Financial news aggregation
-* Sentiment analysis using FinBERT
-* Stock sentiment scoring
-* Buy / Hold / Sell recommendations
-* Interactive Streamlit dashboard
-* Real-time news fetching from APIs
-
----
-
-# Requirements
-
-Install Python **3.9+** before running the project.
-
-Required Python packages:
-
-```
-streamlit
-transformers
-torch
-yfinance
-feedparser
-streamlit-autorefresh
-requests
-numpy
+```powershell
+python sentiment_service.py
 ```
 
----
+Then run the worker and dashboard in separate activated terminals:
 
-# Setup Instructions
-
-Follow these steps to run the project locally.
-
----
-
-## Step 1 — Clone the repository
-
-```
-git clone https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
+```powershell
+python realtime_worker.py
 ```
 
-```
-cd YOUR_REPOSITORY
-```
-
----
-
-## Step 2 — Create a virtual environment
-
-```
-python -m venv venv
-```
-
-Activate the environment.
-
-### Windows
-
-```
-venv\Scripts\activate
-```
-
-### Mac / Linux
-
-```
-source venv/bin/activate
-```
-
----
-
-## Step 3 — Install dependencies
-
-```
-pip install streamlit transformers torch yfinance feedparser streamlit-autorefresh requests numpy
-```
-
----
-
-## Step 4 — Generate the FinBERT model
-
-The repository does **not contain the FinBERT model files**.
-
-Run the following script to automatically download and create them:
-
-```
-python finbert.py
-```
-
-This will create:
-
-```
-finbert_model/
-```
-
-containing:
-
-```
-config.json
-model.safetensors
-tokenizer.json
-tokenizer_config.json
-vocab.txt
-```
-
----
-
-## Step 5 — Run the dashboard
-
-Start the Streamlit app:
-
-```
+```powershell
 streamlit run app2.py
 ```
 
----
+For the first test, keep `DEFAULT_SYMBOL=INFY`. The worker polls at `POLL_INTERVAL_SECONDS` (default 60 seconds); set this no lower than 10 seconds to avoid excessive provider requests.
 
-## Step 6 — Open the dashboard
+## Trained model layout
 
-After running the command, Streamlit will display a local URL such as:
+The default model path is `models/finbert_model`. Supported local layouts:
 
-```
-http://localhost:8501
-```
-
-Open it in your browser to view the dashboard.
-
----
-
-# How the System Works
-
-1. News headlines are collected from multiple sources.
-2. Headlines are cleaned and filtered.
-3. FinBERT processes each headline.
-4. Sentiment scores are calculated.
-5. Average sentiment determines:
-
-```
-Positive sentiment → Buy
-Negative sentiment → Sell
-Neutral sentiment → Hold
+```text
+models/finbert_model/
+  config.json
+  model.safetensors (or pytorch_model.bin)
+  tokenizer.json / tokenizer_config.json / vocab files
 ```
 
-Results are displayed in the dashboard.
+or the two-fold training output:
 
----
+```text
+models/finbert_model/
+  tokenizer.json / tokenizer_config.json / vocab files
+  fold_1/
+    config.json
+    model.safetensors (or pytorch_model.bin)
+  fold_2/
+    config.json
+    model.safetensors (or pytorch_model.bin)
+```
 
-# Notes
+Set `MODEL_PATH` if your model is elsewhere. Alternatively, set `MODEL_ID` to a Hugging Face model repository; for a private repo, set `HF_TOKEN` in `.env`. Never commit `.env` or access tokens. The ZIP does not include model weights; copy them separately or configure `MODEL_ID`.
 
-* Large files such as model weights are excluded from GitHub using `.gitignore`.
-* The FinBERT model is generated locally when running `finbert.py`.
-* API keys may be required depending on the news sources used.
+## Docker Compose
 
----
+1. Copy `.env.example` to `.env` and add your API keys.
+2. Put model files under `models/finbert_model` or configure `MODEL_ID`.
+3. Run:
 
-# Future Improvements
+```powershell
+docker compose up --build
+```
 
-Possible enhancements:
+4. Open <http://localhost:8503>. Redis is published on host port `6390`; containers connect to it at `redis:6379`.
 
-* Sector-wise sentiment heatmap
-* Sentiment trend analysis
-* Market-wide sentiment tracking
-* GPT-based financial news summarization
-* Deployment using Streamlit Cloud or Docker
+The Docker image installs CPU-only PyTorch to avoid downloading CUDA libraries. The Docker build still needs internet access for Python packages and any Hugging Face model not supplied locally. The model folder is not ignored by `.dockerignore`; large model weights can make the image large.
 
----
+## Useful checks
 
-# License
+```powershell
+python -m compileall .
+python -c "import torch; print(torch.__version__); print('CUDA:', torch.cuda.is_available())"
+```
 
-This project is intended for **educational and research purposes**.
+To run the signal engine's local smoke test:
+
+```powershell
+python signal_service.py
+```
+
+## Current limitations
+
+- News/quote updates are polling-based, not a push streaming feed.
+- The worker currently processes one configured symbol per process.
+- Signal weights and thresholds are heuristic and require backtesting.
+- Signal history is bounded to the most recent 1,000 snapshots and expires after 30 days.
+- Provider availability, API quotas, and symbol coverage depend on the configured vendors.

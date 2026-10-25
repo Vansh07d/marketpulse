@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
+import os   
+import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -200,6 +202,15 @@ def normalize_article(
         "published_at": parsed_time.isoformat() if parsed_time else None,
     }
 
+_SECRET = re.compile(r"(token|apikey|api_token|api_key|key)=[^&\s)\'\"]+", re.I)
+_DISABLED_UNTIL: Dict[str, float] = {}   # provider -> unix time until which it is skipped
+PROVIDER_BACKOFF_SECONDS = 3600
+
+
+def _redact(text: str) -> str:
+    """Hide API keys that requests puts inside exception messages."""
+    return _SECRET.sub(r"\1=***", text)
+
 
 def request_json(
     url: str,
@@ -235,7 +246,7 @@ def request_json(
         return None
 
     except requests.RequestException as exc:
-        logger.warning("Request failed [%s]: %s", url, exc)
+        logger.warning("Request failed [%s]: %s", url, _redact(str(exc)))
         return None
 
 
@@ -359,6 +370,8 @@ def fetch_provider_news(provider: str, company: str) -> List[Dict[str, Any]]:
     """Generic fetch + normalize for any configured provider."""
     cfg = PROVIDERS[provider]
     label = cfg["label"]
+    if time.time() < _DISABLED_UNTIL.get(provider, 0):
+        return []
 
     if not cfg["key"]:
         logger.debug("%s API key not configured", label)
@@ -387,7 +400,8 @@ def fetch_provider_news(provider: str, company: str) -> List[Dict[str, Any]]:
         # Provider refused the request (rate limit, bad key, etc.)
         for key in cfg.get("fail", ()):
             if key in data:
-                logger.warning("%s | %s: %s", company, label, data[key])
+                logger.warning("%s | %s: %s (skipping it for %d min)",company, label, data[key], PROVIDER_BACKOFF_SECONDS // 60)
+                _DISABLED_UNTIL[provider] = time.time() + PROVIDER_BACKOFF_SECONDS
                 return []
 
         # Provider-level warnings; keep processing.

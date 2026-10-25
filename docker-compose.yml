@@ -1,9 +1,8 @@
-
 services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6390:6379"
+      - "6391:6379"
     volumes:
       - redis-data:/data
     command: ["redis-server", "--appendonly", "yes"]
@@ -22,8 +21,11 @@ services:
       - .env
     environment:
       REDIS_HOST: redis
-      REDIS_PORT: "6379"
+      REDIS_PORT: "6391"
       REDIS_DB: "0"
+      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-60}"
+      MODEL_PATH: "${MODEL_PATH:-models/finbert_model}"
+      MODEL_ID: "${MODEL_ID:-}"
     depends_on:
       redis:
         condition: service_healthy
@@ -38,10 +40,12 @@ services:
       - .env
     environment:
       REDIS_HOST: redis
-      REDIS_PORT: "6380"
+      REDIS_PORT: "6390"
       REDIS_DB: "0"
+      DEFAULT_SYMBOL: "${DEFAULT_SYMBOL:-INFY}"
+      REFRESH_INTERVAL_SECONDS: "${REFRESH_INTERVAL_SECONDS:-10}"
     ports:
-      - "8503:8503"
+      - "8503:8501"
     depends_on:
       redis:
         condition: service_healthy
@@ -51,7 +55,7 @@ services:
       - run
       - app2.py
       - --server.address=0.0.0.0
-      - --server.port=8503
+      - --server.port=8501
       - --server.headless=true
       - --browser.gatherUsageStats=false
 

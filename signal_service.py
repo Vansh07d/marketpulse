@@ -1,246 +1,93 @@
 """
 MarketPulse - Signal Service
 
-Combines:
-    1. News sentiment from FinBERT
-    2. Stock price momentum
-    3. Market momentum
+Combines FinBERT news sentiment (with recency decay), stock price momentum and
+relative market momentum into one BUY / HOLD / SELL signal.
 
-into a single BUY / HOLD / SELL signal.
-
-Initial weighting:
-    News sentiment  = 60%
-    Price momentum  = 25%
-    Market momentum = 15%
-
-IMPORTANT:
-These weights and thresholds are initial heuristics.
-They must be backtested before being treated as predictive.
+Weights (news 60 / price 25 / market 15) and thresholds are initial heuristics;
+backtest them before treating the signal as predictive.
 """
 
 from __future__ import annotations
 
 import logging
+import math
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-NEWS_WEIGHT = 0.60
-PRICE_WEIGHT = 0.25
-MARKET_WEIGHT = 0.15
-
-BUY_THRESHOLD = 0.40
-SELL_THRESHOLD = -0.40
-
-# Percentage change at which price momentum reaches
-# approximately +1 or -1.
-
-PRICE_MOMENTUM_SCALE = 5.0
-MARKET_MOMENTUM_SCALE = 3.0
-
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
+NEWS_WEIGHT, PRICE_WEIGHT, MARKET_WEIGHT = 0.60, 0.25, 0.15
+BUY_THRESHOLD, SELL_THRESHOLD = 0.40, -0.40
+PRICE_MOMENTUM_SCALE = 5.0    # % move that maps to +/-1
+MARKET_MOMENTUM_SCALE = 3.0   # % outperformance vs benchmark that maps to +/-1
+NEWS_HALF_LIFE_HOURS = max(1.0, float(os.getenv("NEWS_HALF_LIFE_HOURS", "6")))
+# Extra "neutral" weight in the news average. 0 keeps the plain decay-weighted mean;
+# ~0.5 makes old news fade toward neutral instead of keeping full strength.
+NEWS_PRIOR_WEIGHT = max(0.0, float(os.getenv("NEWS_PRIOR_WEIGHT", "0")))
 
 logger = logging.getLogger("marketpulse.signal")
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
-def clamp(
-    value: float,
-    minimum: float = -1.0,
-    maximum: float = 1.0,
-) -> float:
-    """
-    Keep a value within a specified range.
-    """
-
-    return max(
-        minimum,
-        min(maximum, value),
-    )
+def clamp(value: float, minimum: float = -1.0, maximum: float = 1.0) -> float:
+    return max(minimum, min(maximum, value))
 
 
 def utc_now() -> str:
-    """
-    Return current UTC timestamp.
-    """
-
-    return datetime.now(
-        timezone.utc
-    ).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
-# ============================================================
-# NEWS SENTIMENT
-# ============================================================
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(number) else number
 
-def calculate_news_sentiment(
-    sentiment_results: List[Dict[str, Any]],
-) -> float:
-    """
-    Calculate average FinBERT sentiment.
 
-    Each result is expected to contain:
+def _decay_weight(published_at: Any, now: datetime) -> float:
+    if not published_at:
+        return 1.0
+    try:
+        ts = datetime.fromisoformat(str(published_at).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age_hours = max(0.0, (now - ts.astimezone(timezone.utc)).total_seconds() / 3600)
+        return math.exp(-math.log(2) * age_hours / NEWS_HALF_LIFE_HOURS)
+    except (ValueError, TypeError):
+        return 1.0
 
-        {
-            "score": positive_probability - negative_probability
-        }
 
-    Score range:
-        -1 = strongly negative
-        +1 = strongly positive
-    """
-
-    if not sentiment_results:
-        return 0.0
-
-    scores = []
-
-    for result in sentiment_results:
-
-        score = result.get("score")
-
+def calculate_news_sentiment(sentiment_results: List[Dict[str, Any]]) -> float:
+    """Recency-weighted mean FinBERT score in [-1, 1]."""
+    now = datetime.now(timezone.utc)
+    total = weights = 0.0
+    for result in sentiment_results or []:
+        score = _to_float(result.get("score"))
         if score is None:
             continue
-
-        try:
-            scores.append(float(score))
-        except (TypeError, ValueError):
-            continue
-
-    if not scores:
-        return 0.0
-
-    return clamp(
-        sum(scores) / len(scores)
-    )
+        w = _decay_weight(result.get("published_at"), now)
+        total += clamp(score) * w
+        weights += w
+    return clamp(total / (weights + NEWS_PRIOR_WEIGHT)) if weights else 0.0
 
 
-# ============================================================
-# PRICE MOMENTUM
-# ============================================================
-
-def calculate_price_momentum(
-    change_percent: Optional[float],
-) -> float:
-    """
-    Convert percentage price change into a bounded
-    momentum score between -1 and +1.
-
-    Example with scale = 5:
-
-        +5% → +1
-        +2.5% → +0.5
-         0% → 0
-        -2.5% → -0.5
-        -5% → -1
-    """
-
-    if change_percent is None:
-        return 0.0
-
-    try:
-        change = float(change_percent)
-    except (TypeError, ValueError):
-        return 0.0
-
-    return clamp(
-        change / PRICE_MOMENTUM_SCALE
-    )
+def calculate_price_momentum(change_percent: Optional[float]) -> float:
+    change = _to_float(change_percent)
+    return 0.0 if change is None else clamp(change / PRICE_MOMENTUM_SCALE)
 
 
-# ============================================================
-# MARKET MOMENTUM
-# ============================================================
-
-def calculate_market_momentum(
-    stock_change_percent: Optional[float],
-    market_change_percent: Optional[float],
-) -> float:
-    """
-    Calculate relative market momentum.
-
-    We care about how the stock is performing relative
-    to the broader market.
-
-    Example:
-
-        Stock  = +4%
-        Market = +1%
-
-        Relative movement = +3%
-
-    The result is normalized to approximately -1 to +1.
-    """
-
-    if stock_change_percent is None:
-        return 0.0
-
-    if market_change_percent is None:
-        return 0.0
-
-    try:
-        stock_change = float(
-            stock_change_percent
-        )
-
-        market_change = float(
-            market_change_percent
-        )
-
-    except (TypeError, ValueError):
-        return 0.0
-
-    relative_change = (
-        stock_change - market_change
-    )
-
-    return clamp(
-        relative_change / MARKET_MOMENTUM_SCALE
-    )
+def calculate_market_momentum(stock_change: Optional[float], market_change: Optional[float]) -> float:
+    stock, market = _to_float(stock_change), _to_float(market_change)
+    return 0.0 if stock is None or market is None else clamp((stock - market) / MARKET_MOMENTUM_SCALE)
 
 
-# ============================================================
-# SIGNAL CLASSIFICATION
-# ============================================================
-
-def classify_signal(
-    signal_score: float,
-) -> str:
-    """
-    Convert numerical signal score into:
-
-        BUY
-        HOLD
-        SELL
-    """
-
+def classify_signal(signal_score: float) -> str:
     if signal_score >= BUY_THRESHOLD:
         return "BUY"
-
     if signal_score <= SELL_THRESHOLD:
         return "SELL"
-
     return "HOLD"
 
-
-# ============================================================
-# SIGNAL ENGINE
-# ============================================================
 
 def generate_signal(
     *,
@@ -249,271 +96,47 @@ def generate_signal(
     market_data: Dict[str, Any],
     benchmark_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
-    Generate a MarketPulse trading signal.
-
-    Parameters
-    ----------
-    symbol:
-        Internal company symbol.
-
-    sentiment_results:
-        FinBERT results for recent news.
-
-    market_data:
-        Output from market_service.py.
-
-    benchmark_data:
-        Market benchmark data, such as NIFTY or S&P 500.
-
-    Returns
-    -------
-    Dictionary containing signal components and final signal.
-    """
-
     symbol = symbol.upper().strip()
+    stock_change = market_data.get("change_percent")
+    market_change = (benchmark_data or {}).get("change_percent")
 
-    # --------------------------------------------------------
-    # 1. NEWS SENTIMENT
-    # --------------------------------------------------------
+    news = calculate_news_sentiment(sentiment_results)
+    price = calculate_price_momentum(stock_change)
+    market = calculate_market_momentum(stock_change, market_change)
 
-    news_sentiment = calculate_news_sentiment(
-        sentiment_results
-    )
+    news_c, price_c, market_c = NEWS_WEIGHT * news, PRICE_WEIGHT * price, MARKET_WEIGHT * market
+    score = clamp(news_c + price_c + market_c)
+    signal = classify_signal(score)
+    now = utc_now()
 
-    # --------------------------------------------------------
-    # 2. PRICE MOMENTUM
-    # --------------------------------------------------------
-
-    stock_change = market_data.get(
-        "change_percent"
-    )
-
-    price_momentum = calculate_price_momentum(
-        stock_change
-    )
-
-    # --------------------------------------------------------
-    # 3. MARKET MOMENTUM
-    # --------------------------------------------------------
-
-    market_change = None
-
-    if benchmark_data:
-
-        market_change = benchmark_data.get(
-            "change_percent"
-        )
-
-    market_momentum = calculate_market_momentum(
-        stock_change,
-        market_change,
-    )
-
-    # --------------------------------------------------------
-    # 4. WEIGHTED SIGNAL
-    # --------------------------------------------------------
-
-    news_component = (
-        NEWS_WEIGHT * news_sentiment
-    )
-
-    price_component = (
-        PRICE_WEIGHT * price_momentum
-    )
-
-    market_component = (
-        MARKET_WEIGHT * market_momentum
-    )
-
-    signal_score = (
-        news_component
-        + price_component
-        + market_component
-    )
-
-    signal_score = clamp(
-        signal_score
-    )
-
-    # --------------------------------------------------------
-    # 5. CLASSIFICATION
-    # --------------------------------------------------------
-
-    signal = classify_signal(
-        signal_score
-    )
-
-    # --------------------------------------------------------
-    # 6. RESULT
-    # --------------------------------------------------------
-
-    result = {
+    logger.info("%s | %s | score=%+.4f | news=%+.4f | price=%+.4f | market=%+.4f",
+                symbol, signal, score, news, price, market)
+    return {
         "symbol": symbol,
-
         "signal": signal,
-
-        "signal_score": round(
-            signal_score,
-            4,
-        ),
-
-        "news_sentiment": round(
-            news_sentiment,
-            4,
-        ),
-
-        "price_momentum": round(
-            price_momentum,
-            4,
-        ),
-
-        "market_momentum": round(
-            market_momentum,
-            4,
-        ),
-
-        "news_component": round(
-            news_component,
-            4,
-        ),
-
-        "price_component": round(
-            price_component,
-            4,
-        ),
-
-        "market_component": round(
-            market_component,
-            4,
-        ),
-
-        "price": market_data.get(
-            "price"
-        ),
-
+        "signal_score": round(score, 4),
+        "news_sentiment": round(news, 4),
+        "price_momentum": round(price, 4),
+        "market_momentum": round(market, 4),
+        "news_component": round(news_c, 4),
+        "price_component": round(price_c, 4),
+        "market_component": round(market_c, 4),
+        "price": market_data.get("price"),
         "change_percent": stock_change,
-
-        "volume": market_data.get(
-            "volume"
-        ),
-
+        "volume": market_data.get("volume"),
         "market_change_percent": market_change,
-
-        "timestamp": utc_now(),
+        "market_data": market_data,   # read by the dashboard
+        "updated_at": now,            # read by the dashboard
+        "timestamp": now,
     }
 
-    logger.info(
-        "%s | %s | score=%+.4f | "
-        "news=%+.4f | price=%+.4f | market=%+.4f",
-        symbol,
-        signal,
-        signal_score,
-        news_sentiment,
-        price_momentum,
-        market_momentum,
-    )
-
-    return result
-
-
-# ============================================================
-# SIMPLE SIGNAL WITHOUT BENCHMARK
-# ============================================================
-
-def generate_signal_without_benchmark(
-    *,
-    symbol: str,
-    sentiment_results: List[Dict[str, Any]],
-    market_data: Dict[str, Any],
-) -> Dict[str, Any]:
-    """
-    Generate a signal when benchmark data isn't available.
-
-    Market momentum becomes 0.
-
-    This is useful for testing and development.
-    """
-
-    return generate_signal(
-        symbol=symbol,
-        sentiment_results=sentiment_results,
-        market_data=market_data,
-        benchmark_data=None,
-    )
-
-
-# ============================================================
-# TEST
-# ============================================================
 
 if __name__ == "__main__":
-
-    print("=" * 60)
-    print("MARKETPULSE SIGNAL SERVICE")
-    print("=" * 60)
-
-    # --------------------------------------------------------
-    # Fake FinBERT results
-    # --------------------------------------------------------
-
-    test_sentiment = [
-        {
-            "text": "Infosys reports strong quarterly growth",
-            "label": "positive",
-            "score": 0.92,
-        },
-        {
-            "text": "Infosys receives major new contract",
-            "label": "positive",
-            "score": 0.81,
-        },
-        {
-            "text": "Infosys faces margin pressure",
-            "label": "negative",
-            "score": -0.35,
-        },
-    ]
-
-    # --------------------------------------------------------
-    # Fake market data
-    # --------------------------------------------------------
-
-    test_market_data = {
-        "symbol": "INFY",
-        "price": 1035.0,
-        "previous_close": 995.0,
-        "change_percent": 4.0201,
-        "volume": 2245124,
-        "provider": "alpha_vantage",
-    }
-
-    # --------------------------------------------------------
-    # Fake benchmark
-    # --------------------------------------------------------
-
-    test_benchmark = {
-        "symbol": "NIFTY",
-        "price": 25000.0,
-        "change_percent": 1.20,
-    }
-
-    # --------------------------------------------------------
-    # Generate signal
-    # --------------------------------------------------------
-
-    result = generate_signal(
+    demo = generate_signal(
         symbol="INFY",
-        sentiment_results=test_sentiment,
-        market_data=test_market_data,
-        benchmark_data=test_benchmark,
+        sentiment_results=[{"score": 0.92}, {"score": 0.81}, {"score": -0.35}],
+        market_data={"price": 1035.0, "change_percent": 4.02, "volume": 2245124},
+        benchmark_data={"change_percent": 1.2},
     )
-
-    print()
-
-    for key, value in result.items():
-        print(
-            f"{key:24}: {value}"
-        )
-
-    print("=" * 60)
+    for key, value in demo.items():
+        print(f"{key:24}: {value}")

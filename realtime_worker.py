@@ -1,676 +1,159 @@
 """
 MarketPulse - Real-Time Background Worker
 
-Pipeline:
+News APIs -> Redis dedup -> new articles only -> FinBERT -> Redis news state
+          -> market data + benchmark -> signal engine -> Redis
 
-    News APIs
-        ↓
-    Redis deduplication
-        ↓
-    New articles only
-        ↓
-    FinBERT
-        ↓
-    Redis news state
-        ↓
-    Fresh market data
-        ↓
-    Signal engine
-        ↓
-    Redis
-
-Development mode:
-    INFY only
+Development mode: one symbol (DEFAULT_SYMBOL, default INFY).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import time
 from typing import Any, Dict, List
 
+from market_service import fetch_market_data, fetch_nifty_benchmark
 from news_service import fetch_company_news
-from sentiment_service import get_finbert
-from market_service import (
-    fetch_market_data,
-    fetch_nifty_benchmark,
-)
-from signal_service import generate_signal
 from redis_client import get_redis
+from sentiment_service import get_finbert
+from signal_service import generate_signal
 
-
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-SYMBOL = "INFY"
-
-POLL_INTERVAL_SECONDS = 60
-
+SYMBOL = os.getenv("DEFAULT_SYMBOL", "INFY").strip().upper()
+POLL_INTERVAL_SECONDS = max(10, int(os.getenv("POLL_INTERVAL_SECONDS", "300")))
 MAX_NEW_ARTICLES_PER_CYCLE = 10
-
 MAX_STORED_ARTICLES = 20
 
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format=(
-        "%(asctime)s | "
-        "%(levelname)s | "
-        "%(message)s"
-    ),
-)
-
-logger = logging.getLogger(
-    "marketpulse.worker"
-)
-
-
-# ============================================================
-# WORKER STATE
-# ============================================================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger("marketpulse.worker")
 
 running = True
 
 
-def stop_worker(
-    signum: int,
-    frame: Any,
-) -> None:
-
+def stop_worker(signum: int, frame: Any) -> None:
     global running
-
-    logger.info(
-        "Shutdown signal received."
-    )
-
+    logger.info("Shutdown requested - finishing the current step...")
     running = False
 
 
-signal.signal(
-    signal.SIGINT,
-    stop_worker,
-)
-
-signal.signal(
-    signal.SIGTERM,
-    stop_worker,
-)
+signal.signal(signal.SIGINT, stop_worker)
+signal.signal(signal.SIGTERM, stop_worker)
 
 
-# ============================================================
-# FETCH NEW ARTICLES
-# ============================================================
-
-def get_new_articles(
-    redis_client: Any,
-    symbol: str,
-) -> List[Dict[str, Any]]:
-
-    logger.info(
-        "%s | Fetching news...",
-        symbol,
-    )
-
+def get_new_articles(redis_client: Any, symbol: str) -> List[Dict[str, Any]]:
     try:
-
-        articles = fetch_company_news(
-            symbol
-        )
-
-    except Exception as exc:
-
-        logger.exception(
-            "%s | News fetch failed: %s",
-            symbol,
-            exc,
-        )
-
+        articles = fetch_company_news(symbol)
+    except Exception:
+        logger.exception("%s | News fetch failed", symbol)
         return []
-
-    logger.info(
-        "%s | %d articles returned",
-        symbol,
-        len(articles),
-    )
-
-    new_articles = []
-
-    for article in articles:
-
-        if redis_client.is_news_processed(
-            article
-        ):
-
-            logger.debug(
-                "%s | Already processed: %s",
-                symbol,
-                article.get("title"),
-            )
-
-            continue
-
-        new_articles.append(
-            article
-        )
-
-    new_articles = new_articles[
-        :MAX_NEW_ARTICLES_PER_CYCLE
-    ]
-
-    logger.info(
-        "%s | %d new articles",
-        symbol,
-        len(new_articles),
-    )
-
-    return new_articles
+    new = [a for a in articles if not redis_client.is_news_processed(a)][:MAX_NEW_ARTICLES_PER_CYCLE]
+    logger.info("%s | %d articles returned, %d new", symbol, len(articles), len(new))
+    return new
 
 
-# ============================================================
-# PROCESS NEW ARTICLES WITH FINBERT
-# ============================================================
-
-def process_articles(
-    symbol: str,
-    articles: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-
+def process_articles(symbol: str, articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    articles = [a for a in articles if (a.get("title") or "").strip()]
     if not articles:
-
         return []
+    logger.info("%s | Running FinBERT on %d new headlines...", symbol, len(articles))
+    try:
+        results = get_finbert().predict_batch([a["title"].strip() for a in articles])
+    except Exception:
+        logger.exception("%s | FinBERT failed", symbol)
+        return []
+    for article, sentiment in zip(articles, results):
+        logger.info("%s | %s | score=%+.4f", symbol, sentiment.get("label", "unknown").upper(),
+                    sentiment.get("score", 0.0))
+    return [{**a, "sentiment": s} for a, s in zip(articles, results)]
 
-    headlines = [
-        article.get(
-            "title",
-            "",
-        ).strip()
-        for article in articles
+
+def update_news_state(redis_client: Any, symbol: str, new_articles: List[Dict[str, Any]]) -> None:
+    seen, merged = set(), []
+    for article in new_articles + (redis_client.get_news(symbol) or []):
+        article_id = article.get("id") or redis_client.make_article_hash(article)
+        if article_id not in seen:
+            seen.add(article_id)
+            merged.append(article)
+    redis_client.set_news(symbol, merged[:MAX_STORED_ARTICLES])
+
+
+def get_stored_sentiment(redis_client: Any, symbol: str) -> List[Dict[str, Any]]:
+    return [
+        {**a["sentiment"], "published_at": a.get("published_at")}
+        for a in (redis_client.get_news(symbol) or [])
+        if a.get("sentiment")
     ]
 
-    valid_articles = []
-    valid_headlines = []
 
-    for article, headline in zip(
-        articles,
-        headlines,
-    ):
-
-        if not headline:
-            continue
-
-        valid_articles.append(
-            article
-        )
-
-        valid_headlines.append(
-            headline
-        )
-
-    if not valid_headlines:
-
-        logger.warning(
-            "%s | No valid headlines.",
-            symbol,
-        )
-
-        return []
-
-    logger.info(
-        "%s | Running FinBERT on %d new headlines...",
-        symbol,
-        len(valid_headlines),
-    )
-
-    try:
-
-        finbert = get_finbert()
-
-        sentiment_results = (
-            finbert.predict_batch(
-                valid_headlines
-            )
-        )
-
-    except Exception as exc:
-
-        logger.exception(
-            "%s | FinBERT failed: %s",
-            symbol,
-            exc,
-        )
-
-        return []
-
-    processed_articles = []
-
-    for article, sentiment in zip(
-        valid_articles,
-        sentiment_results,
-    ):
-
-        article_with_sentiment = dict(
-            article
-        )
-
-        article_with_sentiment[
-            "sentiment"
-        ] = sentiment
-
-        processed_articles.append(
-            article_with_sentiment
-        )
-
-        logger.info(
-            "%s | %s | score=%+.4f",
-            symbol,
-            sentiment.get(
-                "label",
-                "unknown",
-            ).upper(),
-            sentiment.get(
-                "score",
-                0.0,
-            ),
-        )
-
-    return processed_articles
-
-
-# ============================================================
-# UPDATE REDIS NEWS STATE
-# ============================================================
-
-def update_news_state(
-    redis_client: Any,
-    symbol: str,
-    new_articles: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-
-    existing_articles = (
-        redis_client.get_news(
-            symbol
-        )
-        or []
-    )
-
-    combined = (
-        new_articles
-        + existing_articles
-    )
-
-    unique_articles = []
-
-    seen_ids = set()
-
-    for article in combined:
-
-        article_id = article.get(
-            "id"
-        )
-
-        if not article_id:
-
-            article_id = (
-                redis_client
-                .make_article_hash(
-                    article
-                )
-            )
-
-        if article_id in seen_ids:
-            continue
-
-        seen_ids.add(
-            article_id
-        )
-
-        unique_articles.append(
-            article
-        )
-
-    unique_articles = (
-        unique_articles[
-            :MAX_STORED_ARTICLES
-        ]
-    )
-
-    redis_client.set_news(
-        symbol,
-        unique_articles,
-    )
-
-    return unique_articles
-
-
-# ============================================================
-# EXTRACT STORED SENTIMENT
-# ============================================================
-
-def get_stored_sentiment(
-    redis_client: Any,
-    symbol: str,
-) -> List[Dict[str, Any]]:
-
-    stored_news = (
-        redis_client.get_news(
-            symbol
-        )
-        or []
-    )
-
-    sentiment_results = []
-
-    for article in stored_news:
-
-        sentiment = article.get(
-            "sentiment"
-        )
-
-        if not sentiment:
-            continue
-
-        sentiment_results.append(
-            sentiment
-        )
-
-    return sentiment_results
-
-
-# ============================================================
-# GENERATE + STORE SIGNAL
-# ============================================================
-
-def update_signal(
-    redis_client: Any,
-    symbol: str,
-    sentiment_results: List[Dict[str, Any]],
-    market_data: Dict[str, Any],
-) -> Dict[str, Any]:
-
-    signal_result = generate_signal(
-        symbol=symbol,
-        sentiment_results=sentiment_results,
-        market_data=market_data,
-        benchmark_data=None,
-    )
-
-    redis_client.set_signal(
-        symbol,
-        signal_result,
-    )
-
-    logger.info(
-        "%s | %s | score=%+.4f",
-        symbol,
-        signal_result.get(
-            "signal"
-        ),
-        signal_result.get(
-            "signal_score",
-            0.0,
-        ),
-    )
-
-    return signal_result
-
-
-# ============================================================
-# SINGLE WORKER CYCLE
-# ============================================================
-
-def run_cycle(
-    redis_client: Any,
-    symbol: str,
-) -> None:
-
-    logger.info(
-        "=================================================="
-    )
-
-    logger.info(
-        "%s | Starting worker cycle",
-        symbol,
-    )
-
-    # ========================================================
-    # STEP 1 — FETCH NEW NEWS
-    # ========================================================
-
-    new_articles = get_new_articles(
-        redis_client,
-        symbol,
-    )
-
-    # ========================================================
-    # STEP 2 — RUN FINBERT ONLY ON NEW ARTICLES
-    # ========================================================
-
-    processed_articles = process_articles(
-        symbol,
-        new_articles,
-    )
-
-    # ========================================================
-    # STEP 3 — UPDATE REDIS NEWS STATE
-    # ========================================================
-
-    if processed_articles:
-
-        update_news_state(
-            redis_client,
-            symbol,
-            processed_articles,
-        )
-
-        for article in processed_articles:
-
-            redis_client.mark_news_processed(
-                article
-            )
-
-        logger.info(
-            "%s | Stored %d processed articles",
-            symbol,
-            len(processed_articles),
-        )
-
+def run_cycle(redis_client: Any, symbol: str) -> None:
+    logger.info("%s | Starting worker cycle", symbol)
+
+    processed = process_articles(symbol, get_new_articles(redis_client, symbol))
+    if processed:
+        update_news_state(redis_client, symbol, processed)
+        for article in processed:
+            redis_client.mark_news_processed(article)
+        logger.info("%s | Stored %d processed articles", symbol, len(processed))
     else:
-
-        logger.info(
-            "%s | No new articles to process",
-            symbol,
-        )
-
-    # ========================================================
-    # STEP 4 — GET CURRENT MARKET DATA
-    # ========================================================
-
-    logger.info(
-        "%s | Fetching market data...",
-        symbol,
-    )
+        # re-set so the stored news keeps its TTL while nothing new arrives
+        stored = redis_client.get_news(symbol)
+        if stored:
+            redis_client.set_news(symbol, stored)
 
     try:
-
-        market_data = fetch_market_data(
-            symbol
-        )
-
-    except Exception as exc:
-
-        logger.exception(
-            "%s | Market data failed: %s",
-            symbol,
-            exc,
-        )
-
+        market_data = fetch_market_data(symbol)
+    except Exception:
+        logger.exception("%s | Market data failed", symbol)
         return
-
     if not market_data:
-
-        logger.warning(
-            "%s | No market data available.",
-            symbol,
-        )
-
+        logger.warning("%s | No market data available.", symbol)
         return
 
-    # ========================================================
-    # STEP 5 — GET ALL CURRENT SENTIMENT FROM REDIS
-    # ========================================================
-
-    sentiment_results = (
-        get_stored_sentiment(
-            redis_client,
-            symbol,
-        )
-    )
-
-    if not sentiment_results:
-
-        logger.warning(
-            "%s | No stored sentiment available "
-            "for signal generation.",
-            symbol,
-        )
-
+    sentiments = get_stored_sentiment(redis_client, symbol)
+    if not sentiments:
+        logger.warning("%s | No stored sentiment available for signal generation.", symbol)
         return
 
-    if processed_articles:
+    try:
+        benchmark = fetch_nifty_benchmark()   # cached; last good value on failure
+    except Exception as exc:
+        logger.warning("Benchmark failed; generating signal without it: %s", exc)
+        benchmark = None
 
-        logger.info(
-            "%s | Using newly updated sentiment state",
-            symbol,
-        )
+    result = generate_signal(symbol=symbol, sentiment_results=sentiments,
+                             market_data=market_data, benchmark_data=benchmark)
+    redis_client.set_signal(symbol, result)
+    logger.info("%s | Worker cycle complete", symbol)
 
-    else:
-
-        logger.info(
-            "%s | No new news — reusing existing "
-            "sentiment from Redis",
-            symbol,
-        )
-
-    # ========================================================
-    # STEP 6 — GENERATE SIGNAL
-    # ========================================================
-
-    update_signal(
-        redis_client,
-        symbol,
-        sentiment_results,
-        market_data,
-    )
-
-    logger.info(
-        "%s | Worker cycle complete",
-        symbol,
-    )
-
-
-# ============================================================
-# MAIN WORKER LOOP
-# ============================================================
 
 def main() -> None:
-
-    global running
-
-    print()
     print("=" * 70)
     print("MARKETPULSE REAL-TIME WORKER")
+    print(f"Symbol: {SYMBOL} | Poll interval: {POLL_INTERVAL_SECONDS}s | Ctrl+C once to stop")
     print("=" * 70)
-
-    print(
-        f"Symbol         : {SYMBOL}"
-    )
-
-    print(
-        f"Poll interval  : "
-        f"{POLL_INTERVAL_SECONDS} seconds"
-    )
-
-    print("=" * 70)
-    print()
-
-    # ========================================================
-    # REDIS
-    # ========================================================
 
     redis_client = get_redis()
-
     if not redis_client.ping():
-
-        logger.error(
-            "Redis is unavailable."
-        )
-
-        raise SystemExit(1)
-
-    logger.info(
-        "Redis connection successful."
-    )
-
-    # ========================================================
-    # WORKER LOOP
-    # ========================================================
+        raise SystemExit("Redis is unavailable.")
+    logger.info("Redis connection successful.")
 
     while running:
-
-        cycle_started = time.time()
-
+        started = time.time()
         try:
+            run_cycle(redis_client, SYMBOL)
+        except Exception:
+            logger.exception("Unexpected worker error")
 
-            run_cycle(
-                redis_client,
-                SYMBOL,
-            )
+        deadline = started + POLL_INTERVAL_SECONDS
+        if running and time.time() < deadline:
+            logger.info("%s | Sleeping %.0f seconds...", SYMBOL, deadline - time.time())
+        while running and time.time() < deadline:   # 1s steps so Ctrl+C is instant while idle
+            time.sleep(1)
 
-        except Exception as exc:
+    logger.info("MarketPulse worker stopped.")
 
-            logger.exception(
-                "Unexpected worker error: %s",
-                exc,
-            )
-
-        elapsed = (
-            time.time()
-            - cycle_started
-        )
-
-        sleep_time = max(
-            0,
-            POLL_INTERVAL_SECONDS
-            - elapsed,
-        )
-
-        if running:
-
-            logger.info(
-                "%s | Sleeping %.1f seconds...",
-                SYMBOL,
-                sleep_time,
-            )
-
-            time.sleep(
-                sleep_time
-            )
-
-    logger.info(
-        "MarketPulse worker stopped."
-    )
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     main()

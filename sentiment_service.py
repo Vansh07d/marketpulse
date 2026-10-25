@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import os
 
 import torch
 from transformers import (
@@ -11,7 +12,9 @@ from transformers import (
 
 BASE_DIR = Path(__file__).resolve().parent
 
-MODEL_PATH = BASE_DIR / "models" / "finbert_model"
+MODEL_PATH = Path(os.getenv("MODEL_PATH", str(BASE_DIR / "models" / "finbert_model")))
+MODEL_ID = os.getenv("MODEL_ID", "").strip()
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip() or None
 
 MAX_LENGTH = 128
 
@@ -41,88 +44,55 @@ class FinBERTSentiment:
         model_path: str | Path = MODEL_PATH,
         max_length: int = MAX_LENGTH,
     ):
-
         self.model_path = Path(model_path)
         self.max_length = max_length
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.models = []
 
-        # ----------------------------------------------------
-        # Verify model exists
-        # ----------------------------------------------------
-
-        if not self.model_path.exists():
-
+        # Accept a local single model, a root with fold_1/fold_2, or a Hub model.
+        if self.model_path.exists():
+            tokenizer_source = self.model_path
+            fold_paths = sorted(
+                [p for p in self.model_path.glob("fold_*") if (p / "config.json").is_file()],
+                key=lambda p: p.name,
+            )
+            if (self.model_path / "config.json").is_file():
+                model_paths = [self.model_path]
+            elif fold_paths:
+                model_paths = fold_paths
+            else:
+                raise FileNotFoundError(
+                    f"No model config.json found under {self.model_path}. "
+                    "Expected config.json at the model root or inside fold_1/, fold_2/."
+                )
+        elif MODEL_ID:
+            tokenizer_source = MODEL_ID
+            model_paths = [MODEL_ID]
+        else:
             raise FileNotFoundError(
-                f"\nFinBERT model not found at:\n"
-                f"{self.model_path}\n\n"
-                f"Expected structure:\n"
-                f"models/\n"
-                f"└── finbert_model/\n"
-                f"    ├── config.json\n"
-                f"    ├── model.safetensors\n"
-                f"    └── tokenizer files\n"
+                f"FinBERT model not found at {self.model_path}. "
+                "Copy your trained model there, or set MODEL_ID to a Hugging Face model repo."
             )
 
-        # ----------------------------------------------------
-        # Select device
-        # ----------------------------------------------------
-
-        self.device = torch.device(
-            "cuda"
-            if torch.cuda.is_available()
-            else "cpu"
+        print(f"\nUsing device: {self.device}")
+        if self.device.type == "cuda":
+            print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"Loading tokenizer from {tokenizer_source}...")
+        hub_source = bool(MODEL_ID and not self.model_path.exists())
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            str(tokenizer_source), token=HF_TOKEN, local_files_only=not hub_source
         )
 
-        print(
-            f"\nUsing device: {self.device}"
-        )
-
-        if torch.cuda.is_available():
-
-            print(
-                f"GPU: "
-                f"{torch.cuda.get_device_name(0)}"
+        for model_path_item in model_paths:
+            print(f"Loading FinBERT model: {model_path_item}")
+            model = AutoModelForSequenceClassification.from_pretrained(
+                str(model_path_item), token=HF_TOKEN, local_files_only=not hub_source
             )
+            model.to(self.device)
+            model.eval()
+            self.models.append(model)
 
-        # ----------------------------------------------------
-        # Load tokenizer
-        # ----------------------------------------------------
-
-        print(
-            "\nLoading FinBERT tokenizer..."
-        )
-
-        self.tokenizer = (
-            AutoTokenizer.from_pretrained(
-                str(self.model_path)
-            )
-        )
-
-        # ----------------------------------------------------
-        # Load trained model
-        # ----------------------------------------------------
-
-        print(
-            "Loading trained FinBERT model..."
-        )
-
-        self.model = (
-            AutoModelForSequenceClassification
-            .from_pretrained(
-                str(self.model_path)
-            )
-        )
-
-        self.model.to(self.device)
-
-        # ----------------------------------------------------
-        # Inference mode
-        # ----------------------------------------------------
-
-        self.model.eval()
-
-        print(
-            "FinBERT loaded successfully."
-        )
+        print(f"FinBERT loaded successfully ({len(self.models)} model(s)).")
 
     # ========================================================
     # SINGLE TEXT PREDICTION
@@ -229,21 +199,14 @@ class FinBERTSentiment:
         # ----------------------------------------------------
 
         with torch.inference_mode():
+            model_probabilities = [
+                torch.softmax(model(**encoded).logits, dim=-1)
+                for model in self.models
+            ]
+            # Average fold probabilities to preserve ensemble inference.
+            probabilities = torch.stack(model_probabilities).mean(dim=0)
 
-            outputs = self.model(
-                **encoded
-            )
-
-            probabilities = torch.softmax(
-                outputs.logits,
-                dim=-1,
-            )
-
-        probabilities = (
-            probabilities
-            .detach()
-            .cpu()
-        )
+        probabilities = probabilities.detach().cpu()
 
         # ----------------------------------------------------
         # Convert predictions

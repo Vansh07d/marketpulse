@@ -2,7 +2,8 @@ from __future__ import annotations
 import yfinance as yf
 import logging
 import os
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import requests
@@ -532,7 +533,7 @@ def fetch_eodhd_quote(
 # PROVIDER FALLBACK
 # ============================================================
 
-def fetch_market_data(
+def fetch_market_data_uncached(
     symbol: str,
 ) -> Optional[Dict[str, Any]]:
     """
@@ -631,7 +632,7 @@ def fetch_market_data_for_symbols(
 
     return results
 
-def fetch_nifty_benchmark():
+def download_nifty_benchmark():
     """
     Fetch NIFTY 50 benchmark data.
 
@@ -727,6 +728,77 @@ def fetch_nifty_benchmark():
         )
 
         return None
+
+# ============================================================
+# CACHING, MARKET HOURS, KEYLESS YAHOO QUOTE
+# ============================================================
+
+IST = timezone(timedelta(hours=5, minutes=30))
+INDIAN_SYMBOLS = {"INFY", "TCS", "RELIANCE", "HDFCBANK", "ICICIBANK", "TATAMOTORS"}
+QUOTE_CACHE_SECONDS = int(os.getenv("QUOTE_CACHE_SECONDS", "300"))
+CLOSED_MARKET_CACHE_SECONDS = 3600
+
+_quote_cache: Dict[str, tuple] = {}
+_benchmark_cache: Dict[str, Any] = {"time": 0.0, "value": None}
+
+
+def nse_open(now: Optional[datetime] = None) -> bool:
+    """NSE regular session, Mon-Fri 09:15-15:30 IST (exchange holidays not handled)."""
+    now = (now or datetime.now(IST)).astimezone(IST)
+    return now.weekday() < 5 and (9, 15) <= (now.hour, now.minute) <= (15, 30)
+
+
+def _cache_ttl(symbol: str) -> int:
+    open_now = nse_open() if symbol in INDIAN_SYMBOLS else True
+    return QUOTE_CACHE_SECONDS if open_now else CLOSED_MARKET_CACHE_SECONDS
+
+
+def fetch_yfinance_quote(symbol: str) -> Optional[Dict[str, Any]]:
+    """Keyless quote from Yahoo Finance."""
+    provider_symbol = f"{symbol}.NS" if symbol in INDIAN_SYMBOLS else symbol
+    try:
+        info = yf.Ticker(provider_symbol).fast_info
+        price, previous = float(info.last_price), float(info.previous_close)
+        if not previous:
+            return None
+        logger.info("%s | yfinance: %.2f", symbol, price)
+        return {
+            "symbol": symbol, "price": price, "previous_close": previous,
+            "change_percent": (price - previous) / previous * 100,
+            "open": None, "high": None, "low": None, "volume": None,
+            "provider": "yfinance", "provider_symbol": provider_symbol,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.warning("%s | yfinance quote failed: %s", symbol, exc)
+        return None
+
+
+def fetch_market_data(symbol: str) -> Optional[Dict[str, Any]]:
+    """Cached quote: yfinance first, then Alpha Vantage / Finnhub / EODHD."""
+    symbol = symbol.upper().strip()
+    if not symbol:
+        raise ValueError("Symbol cannot be empty.")
+    cached = _quote_cache.get(symbol)
+    if cached and time.time() - cached[0] < _cache_ttl(symbol):
+        logger.info("%s | using cached quote (%s)", symbol, cached[1].get("provider"))
+        return cached[1]
+    result = fetch_yfinance_quote(symbol) or _fetch_market_data_uncached(symbol)
+    if result:
+        _quote_cache[symbol] = (time.time(), result)
+    return result or (cached[1] if cached else None)
+
+
+def fetch_nifty_benchmark():
+    """NIFTY 50 change, cached; falls back to the last good value if Yahoo fails."""
+    cache = _benchmark_cache
+    ttl = QUOTE_CACHE_SECONDS if nse_open() else CLOSED_MARKET_CACHE_SECONDS
+    if cache["value"] and time.time() - cache["time"] < ttl:
+        return cache["value"]
+    result = _download_nifty_benchmark()
+    if result:
+        cache["time"], cache["value"] = time.time(), result
+    return result or cache["value"]
 
 # ============================================================
 # TEST

@@ -25,7 +25,7 @@ REDIS_HOST = os.getenv(
 REDIS_PORT = int(
     os.getenv(
         "REDIS_PORT",
-        "6379",
+        "6391",
     )
 )
 
@@ -113,6 +113,10 @@ class RedisClient:
             )
 
             return False
+
+    def health_check(self) -> bool:
+        """Backward-compatible health-check name used by the dashboard."""
+        return self.ping()
 
     # ========================================================
     # GENERIC JSON OPERATIONS
@@ -220,11 +224,37 @@ class RedisClient:
             f"{symbol.upper()}"
         )
 
-        return self.set_json(
+        saved = self.set_json(
             key,
             signal,
             ttl=ttl,
         )
+        if saved:
+            try:
+                history_key = f"signal-history:{symbol.upper()}"
+                self.client.lpush(history_key, json.dumps(signal, ensure_ascii=False))
+                self.client.ltrim(history_key, 0, 999)
+                self.client.expire(history_key, 60 * 60 * 24 * 30)
+            except redis.RedisError as exc:
+                logger.warning("Could not append signal history for %s: %s", symbol, exc)
+        return saved
+
+    def get_signal_history(self, symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return newest signal snapshots, bounded to the requested count."""
+        try:
+            rows = self.client.lrange(f"signal-history:{symbol.upper()}", 0, max(0, limit - 1))
+            result = []
+            for row in rows:
+                try:
+                    item = json.loads(row)
+                    if isinstance(item, dict):
+                        result.append(item)
+                except json.JSONDecodeError:
+                    continue
+            return result
+        except redis.RedisError as exc:
+            logger.error("Redis history read failed for %s: %s", symbol, exc)
+            return []
 
     def get_signal(
         self,
