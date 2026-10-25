@@ -1,63 +1,78 @@
+# Start everything:  docker compose up -d --build
+# Stop everything:   docker compose down
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
     ports:
-      - "6391:6379"
+      - "127.0.0.1:${REDIS_HOST_PORT:-6391}:6379"   # localhost only; Redis has no password
     volumes:
       - redis-data:/data
-    command: ["redis-server", "--appendonly", "yes"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
+    logging: *logging
     restart: unless-stopped
 
   worker:
     build:
       context: .
-      dockerfile: Dockerfile
-    env_file:
-      - .env
+      target: worker
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+    image: marketpulse-worker
+    env_file: [.env]
     environment:
       REDIS_HOST: redis
-      REDIS_PORT: "6391"
+      REDIS_PORT: "6379"                 # inside the compose network Redis always listens on 6379
       REDIS_DB: "0"
-      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-60}"
-      MODEL_PATH: "${MODEL_PATH:-models/finbert_model}"
-      MODEL_ID: "${MODEL_ID:-}"
+      MODEL_PATH: /app/models/finbert_model
+    volumes:
+      - ./models:/app/models:ro          # your trained model stays on disk, never baked into the image
+      - hf-cache:/app/.hf_cache          # keeps downloaded Hugging Face files between rebuilds
     depends_on:
       redis:
         condition: service_healthy
+    init: true
+    stop_grace_period: 40s               # lets the current cycle finish on shutdown
+    logging: *logging
     restart: unless-stopped
-    command: ["python", "realtime_worker.py"]
+    # GPU (NVIDIA Container Toolkit / Docker Desktop WSL2) - also set TORCH_INDEX to the cu121 URL in .env:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
   dashboard:
     build:
       context: .
-      dockerfile: Dockerfile
-    env_file:
-      - .env
+      target: dashboard
+    image: marketpulse-dashboard
+    env_file: [.env]
     environment:
       REDIS_HOST: redis
-      REDIS_PORT: "6390"
+      REDIS_PORT: "6379"
       REDIS_DB: "0"
-      DEFAULT_SYMBOL: "${DEFAULT_SYMBOL:-INFY}"
-      REFRESH_INTERVAL_SECONDS: "${REFRESH_INTERVAL_SECONDS:-10}"
     ports:
-      - "8503:8501"
+      - "127.0.0.1:${DASHBOARD_PORT:-8501}:8501"
     depends_on:
       redis:
         condition: service_healthy
+    logging: *logging
     restart: unless-stopped
-    command:
-      - streamlit
-      - run
-      - app2.py
-      - --server.address=0.0.0.0
-      - --server.port=8501
-      - --server.headless=true
-      - --browser.gatherUsageStats=false
 
 volumes:
   redis-data:
+  hf-cache:

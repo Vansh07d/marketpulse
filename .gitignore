@@ -1,11 +1,21 @@
-cd C:\Users\fcaka\OneDrive\Documents\marketpulse-main
-@"
+# environments
 venv/
 .venv/
+env/
+
+# secrets
+.env
+
+# python
 __pycache__/
 *.py[cod]
-.env
+.pytest_cache/
+
+# trained model (too large for git; use MODEL_PATH or MODEL_ID)
 models/finbert_model/
+
+# misc
 *.log
 .vscode/
-"@ | Set-Content .gitignore
+.idea/
+dump.rdb

@@ -1,10 +1,12 @@
+scikit-learn>=1.5,<2   # only needed to retrain with finbert.py
 streamlit>=1.39,<2
+redis>=5,<7
+python-dotenv>=1,<2
+pandas>=2.2,<3
 redis>=5,<7
 python-dotenv>=1,<2
 requests>=2.31,<3
 yfinance>=0.2.40,<2
 numpy>=1.26,<3
-pandas>=2.2,<3
-scikit-learn>=1.5,<2
 transformers>=4.44,<5
 safetensors>=0.4

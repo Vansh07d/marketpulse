@@ -2,7 +2,8 @@
 MarketPulse - Real-Time Background Worker
 
 News APIs -> Redis dedup -> new articles only -> FinBERT -> Redis news state
-          -> market data + benchmark -> signal engine -> Redis
+          -> market data + benchmark -> signal engine -> Redis (+ signal history)
+          -> latency records (published -> ingested -> scored -> signalled)
 
 Development mode: one symbol (DEFAULT_SYMBOL, default INFY).
 """
@@ -15,6 +16,7 @@ import signal
 import time
 from typing import Any, Dict, List
 
+import latency
 from market_service import fetch_market_data, fetch_nifty_benchmark
 from news_service import fetch_company_news
 from redis_client import get_redis
@@ -49,8 +51,9 @@ def get_new_articles(redis_client: Any, symbol: str) -> List[Dict[str, Any]]:
         logger.exception("%s | News fetch failed", symbol)
         return []
     new = [a for a in articles if not redis_client.is_news_processed(a)][:MAX_NEW_ARTICLES_PER_CYCLE]
+    ingested_at = latency.now_iso()
     logger.info("%s | %d articles returned, %d new", symbol, len(articles), len(new))
-    return new
+    return [{**a, "ingested_at": ingested_at} for a in new]
 
 
 def process_articles(symbol: str, articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -63,10 +66,11 @@ def process_articles(symbol: str, articles: List[Dict[str, Any]]) -> List[Dict[s
     except Exception:
         logger.exception("%s | FinBERT failed", symbol)
         return []
-    for article, sentiment in zip(articles, results):
+    scored_at = latency.now_iso()
+    for sentiment in results:
         logger.info("%s | %s | score=%+.4f", symbol, sentiment.get("label", "unknown").upper(),
                     sentiment.get("score", 0.0))
-    return [{**a, "sentiment": s} for a, s in zip(articles, results)]
+    return [{**a, "sentiment": s, "scored_at": scored_at} for a, s in zip(articles, results)]
 
 
 def update_news_state(redis_client: Any, symbol: str, new_articles: List[Dict[str, Any]]) -> None:
@@ -85,6 +89,23 @@ def get_stored_sentiment(redis_client: Any, symbol: str) -> List[Dict[str, Any]]
         for a in (redis_client.get_news(symbol) or [])
         if a.get("sentiment")
     ]
+
+
+def log_latency(redis_client: Any, symbol: str, processed: List[Dict[str, Any]], signalled_at: str) -> None:
+    """Store per-article latency and log this batch plus the rolling p50 / p95."""
+    batch = latency.record_latencies(redis_client, symbol, processed, signalled_at)
+    if not batch:
+        return
+    recent = latency.summarize(latency.get_latencies(redis_client, symbol))
+    logger.info(
+        "%s | latency: FinBERT %s | signal %s | end-to-end p50 %s, p95 %s (%d articles)",
+        symbol,
+        latency.format_seconds(latency.summarize(batch)["inference_s"]["p50"]),
+        latency.format_seconds(latency.summarize(batch)["signal_s"]["p50"]),
+        latency.format_seconds(recent["end_to_end_s"]["p50"]),
+        latency.format_seconds(recent["end_to_end_s"]["p95"]),
+        recent["end_to_end_s"]["count"],
+    )
 
 
 def run_cycle(redis_client: Any, symbol: str) -> None:
@@ -125,6 +146,7 @@ def run_cycle(redis_client: Any, symbol: str) -> None:
     result = generate_signal(symbol=symbol, sentiment_results=sentiments,
                              market_data=market_data, benchmark_data=benchmark)
     redis_client.set_signal(symbol, result)
+    log_latency(redis_client, symbol, processed, result["updated_at"])
     logger.info("%s | Worker cycle complete", symbol)
 
 

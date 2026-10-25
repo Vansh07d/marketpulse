@@ -783,7 +783,7 @@ def fetch_market_data(symbol: str) -> Optional[Dict[str, Any]]:
     if cached and time.time() - cached[0] < _cache_ttl(symbol):
         logger.info("%s | using cached quote (%s)", symbol, cached[1].get("provider"))
         return cached[1]
-    result = fetch_yfinance_quote(symbol) or _fetch_market_data_uncached(symbol)
+    result = fetch_yfinance_quote(symbol) or fetch_market_data_uncached(symbol)
     if result:
         _quote_cache[symbol] = (time.time(), result)
     return result or (cached[1] if cached else None)
@@ -795,7 +795,7 @@ def fetch_nifty_benchmark():
     ttl = QUOTE_CACHE_SECONDS if nse_open() else CLOSED_MARKET_CACHE_SECONDS
     if cache["value"] and time.time() - cache["time"] < ttl:
         return cache["value"]
-    result = _download_nifty_benchmark()
+    result = download_nifty_benchmark()
     if result:
         cache["time"], cache["value"] = time.time(), result
     return result or cache["value"]
