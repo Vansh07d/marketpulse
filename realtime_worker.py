@@ -17,7 +17,7 @@ import time
 from typing import Any, Dict, List
 
 import latency
-from market_service import fetch_market_data, fetch_nifty_benchmark
+from market_service import INDIAN_SYMBOLS, fetch_market_data, fetch_nifty_benchmark
 from news_service import fetch_company_news
 from redis_client import get_redis
 from sentiment_service import get_finbert
@@ -138,7 +138,7 @@ def run_cycle(redis_client: Any, symbol: str) -> None:
         return
 
     try:
-        benchmark = fetch_nifty_benchmark()   # cached; last good value on failure
+        benchmark = fetch_nifty_benchmark() if symbol in INDIAN_SYMBOLS else None  # cached; last good value on failure
     except Exception as exc:
         logger.warning("Benchmark failed; generating signal without it: %s", exc)
         benchmark = None
