@@ -72,6 +72,18 @@ services:
         condition: service_healthy
     logging: *logging
     restart: unless-stopped
+  inference:
+    build: {context: ., target: worker}
+    image: marketpulse-worker
+    command: ["python", "-m", "streaming.consumer"]
+    profiles: ["stream"]
+    env_file: [.env]
+    environment: {REDIS_HOST: redis, REDIS_PORT: "6379", MODEL_PATH: /app/models/finbert_model}
+    volumes: ["./models:/app/models:ro", "hf-cache:/app/.hf_cache"]
+    depends_on: {redis: {condition: service_healthy}}
+    init: true
+    stop_grace_period: 40s
+    restart: unless-stopped
 
 volumes:
   redis-data:

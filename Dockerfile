@@ -36,6 +36,7 @@ ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --index-url "${TORCH_INDEX}" torch
 COPY --chown=app:app *.py ./
+COPY --chown=app:app streaming ./streaming
 USER app
 ENV HF_HOME=/app/.hf_cache
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
