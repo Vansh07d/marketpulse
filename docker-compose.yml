@@ -85,6 +85,48 @@ services:
     stop_grace_period: 40s
     restart: unless-stopped
 
+
+  # --- streaming pipeline (docker compose --profile stream up -d --build) ---
+  # ingestor -> news.raw -> inference (FinBERT) -> news.scored -> aggregator -> Redis signals + SQLite
+  ingestor:
+    build: {context: ., target: worker}
+    image: marketpulse-worker
+    command: ["python", "-m", "streaming.ingestor"]
+    profiles: ["stream"]
+    env_file: [.env]
+    environment: {REDIS_HOST: redis, REDIS_PORT: "6379"}
+    depends_on: {redis: {condition: service_healthy}}
+    init: true
+    restart: unless-stopped
+    logging: *logging
+
+  aggregator:                       # run exactly ONE instance (per-symbol signal state)
+    build: {context: ., target: worker}
+    image: marketpulse-worker
+    command: ["python", "-m", "streaming.aggregator"]
+    profiles: ["stream"]
+    env_file: [.env]
+    environment: {REDIS_HOST: redis, REDIS_PORT: "6379", REDIS_DB: "0", MARKETPULSE_DB: /app/data/marketpulse.db}
+    volumes: ["mp-data:/app/data"]  # durable research store: scored headlines + signals
+    depends_on: {redis: {condition: service_healthy}}
+    init: true
+    stop_grace_period: 20s
+    restart: unless-stopped
+    logging: *logging
+
+  metrics:                          # http://localhost:9108/metrics  (Prometheus text) and /healthz
+    build: {context: ., target: worker}
+    image: marketpulse-worker
+    command: ["python", "-m", "streaming.metrics"]
+    profiles: ["stream"]
+    environment: {REDIS_HOST: redis, REDIS_PORT: "6379"}
+    ports: ["127.0.0.1:${METRICS_PORT:-9108}:9108"]
+    depends_on: {redis: {condition: service_healthy}}
+    init: true
+    restart: unless-stopped
+    logging: *logging
+
 volumes:
   redis-data:
   hf-cache:
+  mp-data:

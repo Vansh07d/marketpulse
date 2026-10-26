@@ -78,6 +78,17 @@ def to_ms(value: Any) -> int:
     return int(ts.timestamp() * 1000)
 
 
+def check_published(published_ms: int, now: int, max_age_hours: int, future_skew_s: int = 300) -> str:
+    """Classify a source timestamp: 'ok', 'missing' (0/unknown), 'future' (clock/bad data) or 'old'."""
+    if not published_ms:
+        return "missing"
+    if published_ms > now + future_skew_s * 1000:
+        return "future"
+    if max_age_hours and now - published_ms > max_age_hours * 3_600_000:
+        return "old"
+    return "ok"
+
+
 def build_event(article: Dict[str, Any], symbol: str, origin: str, fetched_ms: Optional[int] = None,
                 run: str = "") -> Dict[str, str]:
     """Turn a provider article into a validated, sanitised stream entry (flat str -> str)."""

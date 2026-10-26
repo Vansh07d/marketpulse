@@ -30,6 +30,12 @@ class Settings:
     dedup_ttl_s: int = 86_400
     ingest_interval_s: int = 300
     model_tag: str = "finbert"
+    max_article_age_hours: int = 24     # ingestor drops articles published longer ago than this
+    future_skew_s: int = 300            # ingestor drops articles "published" more than this far ahead
+    aggregator_group: str = "aggregators"
+    signal_refresh_s: int = 60          # aggregator re-prices active symbols this often
+    signal_min_interval_s: int = 5      # per-symbol floor between event-triggered signal recomputes
+    db_path: str = "data/marketpulse.db"
 
     @property
     def raw(self) -> str:
@@ -67,6 +73,12 @@ def load_settings(**overrides) -> Settings:
         dedup_ttl_s=_int("STREAM_DEDUP_TTL_S", 86_400, 60, 30 * 86_400),
         ingest_interval_s=_int("INGEST_INTERVAL_SECONDS", 300, 10, 86_400),
         model_tag=os.getenv("STREAM_MODEL_TAG", "finbert")[:64],
+        max_article_age_hours=_int("NEWS_LOOKBACK_HOURS", 24, 1, 24 * 30),
+        future_skew_s=_int("STREAM_FUTURE_SKEW_S", 300, 0, 86_400),
+        aggregator_group=os.getenv("AGGREGATOR_GROUP", "aggregators"),
+        signal_refresh_s=_int("SIGNAL_REFRESH_S", 60, 5, 3600),
+        signal_min_interval_s=_int("SIGNAL_MIN_INTERVAL_S", 5, 0, 600),
+        db_path=os.getenv("MARKETPULSE_DB", "data/marketpulse.db"),
     )
     base.update(overrides)
     return Settings(**base)

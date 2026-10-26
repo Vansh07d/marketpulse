@@ -20,7 +20,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from streaming.schema import EventError, build_event, now_ms
+from streaming.schema import EventError, build_event, check_published, now_ms
 from streaming.settings import Settings, load_settings
 
 logger = logging.getLogger("marketpulse.ingestor")
@@ -70,7 +70,8 @@ def publish_many(r: Any, events: Iterable[Dict[str, str]], cfg: Settings, dedup:
 def poll_once(r: Any, symbols: List[str], fetch: Callable[[str], List[Dict[str, Any]]],
               cfg: Settings, origin: str = "news_service") -> Dict[str, int]:
     """Fetch every symbol, enqueue new headlines. Returns counts for logging/metrics."""
-    counts = {"fetched": 0, "new": 0, "duplicate": 0, "invalid": 0, "fetch_errors": 0}
+    counts = {"fetched": 0, "new": 0, "duplicate": 0, "invalid": 0, "fetch_errors": 0,
+              "stale": 0, "bad_timestamp": 0, "no_timestamp": 0}
 
     def _fetch(symbol: str):
         try:
@@ -88,10 +89,22 @@ def poll_once(r: Any, symbols: List[str], fetch: Callable[[str], List[Dict[str, 
             counts["fetched"] += len(articles)
             for article in articles:
                 try:
-                    events.append(build_event(article, symbol, origin, fetched_ms))
+                    event = build_event(article, symbol, origin, fetched_ms)
                 except EventError as exc:
                     counts["invalid"] += 1
                     logger.warning("%s | dropped invalid article: %s", symbol, exc)
+                    continue
+                verdict = check_published(int(event["published_ms"]), now_ms(),
+                                          cfg.max_article_age_hours, cfg.future_skew_s)
+                if verdict == "old":
+                    counts["stale"] += 1          # old news is not a signal
+                    continue
+                if verdict == "future":
+                    counts["bad_timestamp"] += 1  # provider clock/format bug; do not trust it
+                    continue
+                if verdict == "missing":
+                    counts["no_timestamp"] += 1   # kept, but the aggregator treats it as published at enqueue time
+                events.append(event)
 
     if events:
         results = publish_many(r, events, cfg)
@@ -110,6 +123,8 @@ def main() -> None:
     from streaming.connection import connect
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+    from streaming.preflight import require
+    require("ingestor")
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true", help="poll one time and exit")
     args = parser.parse_args()

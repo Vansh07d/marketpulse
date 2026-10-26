@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 # create the HF cache dir up front so the named volume mounted there inherits the app user's ownership
 RUN useradd --create-home --uid 1000 app \
-    && mkdir -p /app/.hf_cache \
+    && mkdir -p /app/.hf_cache /app/data \
     && chown -R app:app /app
 
 # ---------- dependencies (installed once, shared by both images) ----------
@@ -37,6 +37,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --index-url "${TORCH_INDEX}" torch
 COPY --chown=app:app *.py ./
 COPY --chown=app:app streaming ./streaming
+COPY --chown=app:app tools ./tools
 USER app
 ENV HF_HOME=/app/.hf_cache
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \

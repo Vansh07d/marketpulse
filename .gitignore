@@ -19,3 +19,6 @@ models/finbert_model/
 .vscode/
 .idea/
 dump.rdb
+# research store + labeled eval data
+data/
+eval/*.csv

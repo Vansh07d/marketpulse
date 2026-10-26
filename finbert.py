@@ -38,6 +38,7 @@ LABEL_SMOOTHING = 0.1
 USE_CLASS_WEIGHTS = True  # set False to compare; may help raw accuracy
 N_FOLDS = 2
 TEST_SIZE = 0.10          # held-out set, never used for training or model selection
+EXTRA_DATA = [p for p in os.getenv("EXTRA_DATA", "").split(",") if p.strip()]  # CSVs with text,label
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_BF16 = DEVICE.type == "cuda" and torch.cuda.is_bf16_supported()
@@ -179,6 +180,18 @@ def main():
     X, y = df["text"].values, df["label_id"].values
     X_dev, X_test, y_dev, y_test = train_test_split(
         X, y, test_size=TEST_SIZE, stratify=y, random_state=SEED)
+    if EXTRA_DATA:  # extra domain data joins TRAINING only; the PhraseBank test split stays comparable
+        seen = set(X_test)
+        for path in EXTRA_DATA:
+            ex = pd.read_csv(path.strip())[["text", "label"]].dropna()
+            ex["text"] = ex["text"].astype(str).str.strip()
+            ex["label_id"] = ex["label"].astype(str).str.lower().str.strip().map(LABEL_MAP)
+            ex = ex.dropna(subset=["label_id"]).drop_duplicates("text")
+            ex = ex[~ex["text"].isin(seen)]
+            seen.update(ex["text"])
+            X_dev = np.concatenate([X_dev, ex["text"].values])
+            y_dev = np.concatenate([y_dev, ex["label_id"].astype(int).values])
+            print(f"Added {len(ex)} extra training rows from {path}")
     print(f"Dev: {len(X_dev)} | Test: {len(X_test)}")
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)

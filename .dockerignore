@@ -20,3 +20,5 @@ all-data.csv
 *.log
 *.md
 dump.rdb
+data/
+eval/

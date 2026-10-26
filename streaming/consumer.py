@@ -235,6 +235,8 @@ def main() -> None:
     from sentiment_service import get_finbert
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+    from streaming.preflight import require
+    require("consumer")
     scorer = get_finbert()
     scorer.predict_batch(["warm-up headline for the model"])      # first call pays one-off setup costs
     consumer = Consumer(connect("CONSUMER"), scorer, load_settings())

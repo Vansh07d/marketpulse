@@ -129,7 +129,7 @@ def dashboard(symbol: str) -> None:
     signal_data = redis_client.get_signal(symbol)
     if not signal_data:
         st.warning(f"No signal available for {symbol} yet.")
-        st.info("Make sure realtime_worker.py is running and has completed one successful cycle. "
+        st.info("Make sure the stream stack (ingestor, inference, aggregator) or the legacy realtime_worker.py is running. "
                 "This page keeps checking automatically.")
         return
     render_header_and_metrics(symbol, signal_data, "₹" if symbol in INDIAN_SYMBOLS else "$")
