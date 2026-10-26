@@ -74,17 +74,24 @@ Set `MODEL_PATH` if your model is elsewhere. Alternatively, set `MODEL_ID` to a 
 
 ## Docker Compose
 
-1. Copy `.env.example` to `.env` and add your API keys.
+1. Copy `.env.example` to `.env`, add your API keys and set `WATCHLIST` (symbols must exist in `news_service.COMPANIES`).
 2. Put model files under `models/finbert_model` or configure `MODEL_ID`.
-3. Run:
+3. Start the streaming stack. Do **not** use a bare `docker compose up`: it also starts the legacy `worker`, which writes the same Redis keys as the aggregator.
 
 ```powershell
-docker compose up --build
+docker compose --profile stream up -d --build redis ingestor inference aggregator metrics dashboard
 ```
 
-4. Open <http://localhost:8503>. Redis is published on host port `6390`; containers connect to it at `redis:6379`.
+4. Dashboard: <http://localhost:8503>. Metrics: <http://localhost:9108/metrics>. Redis is published on host port 6391; containers use `redis:6379`.
+5. The research history (scored headlines and signals) lives in the `mp-data` volume. **Never run `docker compose down -v`** (it deletes the volume). Back it up with:
 
-The Docker image installs CPU-only PyTorch to avoid downloading CUDA libraries. The Docker build still needs internet access for Python packages and any Hugging Face model not supplied locally. The model folder is not ignored by `.dockerignore`; large model weights can make the image large.
+```powershell
+docker compose cp aggregator:/app/data/marketpulse.db data/marketpulse.db
+```
+
+The legacy single-symbol worker (`docker compose up -d redis worker dashboard`) is only for quick demos; do not run it together with the stream stack.
+
+The Docker image installs CPU-only PyTorch to avoid downloading CUDA libraries. The build needs internet access for Python packages and any Hugging Face model not supplied locally. Model weights are mounted from `./models`, not baked into the image.
 
 ## Useful checks
 
@@ -101,11 +108,13 @@ python signal_service.py
 
 ## Current limitations
 
-- News/quote updates are polling-based, not a push streaming feed.
-- The worker currently processes one configured symbol per process.
-- Signal weights and thresholds are heuristic and require backtesting.
-- Signal history is bounded to the most recent 1,000 snapshots and expires after 30 days.
-- Provider availability, API quotas, and symbol coverage depend on the configured vendors.
+- Ingestion is polling-based (`INGEST_INTERVAL_SECONDS`, default 300 s) and providers add their own delay. The pipeline itself adds about 1.4 s p95 at 5 events/s; that is scoring latency, not news freshness.
+- CPU inference capacity is about 6 events/s with the 2-fold ensemble (far above typical news volume).
+- The model was trained and tested on Financial PhraseBank sentences. Accuracy on real headlines is reported in `EVAL.md` once measured.
+- Signal weights and thresholds are heuristic. Predictive value is reported in `BACKTEST.md` once enough history exists; until then treat signals as experimental and not investment advice.
+- One aggregator instance (per-symbol signal state) and a single-writer SQLite store.
+- Redis holds bounded live state (signal history capped at 1,000 snapshots per symbol); SQLite is the durable history.
+- Provider quotas and symbol coverage depend on the configured vendors; only symbols in `news_service.COMPANIES` are supported.
 
 ## Architecture: two paths, one is primary
 
